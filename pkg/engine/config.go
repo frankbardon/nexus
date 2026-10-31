@@ -116,9 +116,9 @@ type CoreConfig struct {
 	MaxConcurrentEvents int            `yaml:"max_concurrent_events"`
 	Sessions            SessionsConfig `yaml:"sessions"`
 	// AgentID partitions per-agent storage and other per-agent state.
-	// Set by multi-agent embedders (the desktop shell) so each agent
-	// instance gets its own ScopeAgent storage tree under
-	// ~/.nexus/agents/<id>/. CLI and single-agent embedders leave it
+	// Set by multi-agent embedders (one host process running several
+	// engines) so each agent instance gets its own ScopeAgent storage tree
+	// under ~/.nexus/agents/<id>/. CLI and single-agent embedders leave it
 	// empty, which collapses ScopeAgent to ScopeApp.
 	AgentID string        `yaml:"agent_id"`
 	Storage StorageConfig `yaml:"storage"`

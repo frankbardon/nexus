@@ -20,8 +20,8 @@ import (
 // Scope determines where a plugin's storage file lands.
 //
 // Session scope is per-session and disappears when the session is archived.
-// Agent scope persists across sessions for a single agent (used by the
-// desktop shell where each agent has its own engine instance). App scope
+// Agent scope persists across sessions for a single agent (used by
+// multi-agent hosts where each agent has its own engine instance). App scope
 // persists across every session and every agent on the machine.
 //
 // In a single-agent embedder (CLI, oneshot), Agent collapses to App since
@@ -31,7 +31,7 @@ type Scope int
 const (
 	// ScopeSession is per-session. Path: <session.RootDir>/plugins/<pluginID>/store.db
 	ScopeSession Scope = iota
-	// ScopeAgent is per-agent (desktop shell multi-agent). Path:
+	// ScopeAgent is per-agent (multi-agent hosts). Path:
 	// ~/.nexus/agents/<agentID>/plugins/<pluginID>/store.db. Falls back to
 	// ScopeApp when the engine has no AgentID configured.
 	ScopeAgent

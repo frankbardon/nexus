@@ -98,7 +98,7 @@ func WriteSessionLock(dir string, pid int) error {
 }
 
 // WriteSessionLockWithTransport is the same as WriteSessionLock but
-// records a transport tag (e.g. "tui", "browser", "wails") so stale-
+// records a transport tag (e.g. "tui", "browser", "oneshot") so stale-
 // lock diagnostics can name the prior run's IO surface. Empty
 // transports are omitted from the JSON.
 func WriteSessionLockWithTransport(dir string, pid int, transport string) error {

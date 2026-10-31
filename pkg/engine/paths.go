@@ -12,7 +12,7 @@ import (
 // cannot be determined, the input is returned as-is.
 //
 // This is the canonical helper for tilde expansion in Nexus. Plugins and
-// the desktop shell should funnel every config-supplied path through this
+// embedders should funnel every config-supplied path through this
 // function so users can write "~/.nexus/foo" anywhere a path is accepted.
 func ExpandPath(path string) string {
 	if path == "" {

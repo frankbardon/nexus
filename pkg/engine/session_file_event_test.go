@@ -5,7 +5,7 @@ package engine
 // E2-S4 recorded that nothing asserted an emitter publishes a session-relative
 // path plus session_id / size / offset / bytes_added, and nominated E3-S5 as
 // the home for it. The gap was real and it had a live instance: until this
-// file existed, cmd/desktop/internal/matcher emitted session.file.created with
+// file existed, an embedder-side file watcher emitted session.file.created with
 // an *absolute* path, an "action" key nothing reads, and none of the other four
 // keys. A subscriber keyed on `path` would have written it under a key no other
 // emitter can produce, and the object-store seam could not have used it at all.
@@ -308,7 +308,7 @@ func TestSessionFileEventsAreEmittedOnlyByTheWorkspaceHelpers(t *testing.T) {
 
 The session.file.* payload is an untyped map, so nothing at compile time and
 nothing in make check-events objects to one carrying the wrong keys or an
-absolute path. That is how a hand-built emit drifts: cmd/desktop's matcher
+absolute path. That is how a hand-built emit drifts: an embedder's file watcher
 carried an absolute path and none of session_id, size, offset or bytes_added
 until E3-S5, and a subscriber keyed on path would have stored it under a key no
 other emitter produces.
@@ -333,7 +333,7 @@ payload".`, dir, site.path, strings.Join(site.sites, "\n    "))
 // The positive control. A scan that finds nothing proves nothing unless it can
 // be shown to find something, and the tree is (now) clean — so the sample is
 // synthetic rather than a file in the repo. It is byte-for-byte the emit
-// cmd/desktop/internal/matcher carried before E3-S5, which is the regression
+// a hand-built emitter outside the engine carried before E3-S5, which is the regression
 // this scan exists to catch.
 //
 // pkg/engine cannot serve as the control: the workspace spells the event type

@@ -5,8 +5,8 @@
 //
 // This is Phase 3 of Idea 18 (multimodal & voice IO). Phase 4 will land
 // nexus.io.voice (VAD + ASR + TTS); Phase 5 may eventually fold the
-// envelope shape into io/browser and io/wails. Until then the realtime
-// transport stands alongside those plugins as a third, lower-latency
+// envelope shape into io/browser. Until then the realtime transport
+// stands alongside the TUI and browser plugins as a lower-latency
 // option for clients that want raw stream.delta deltas without the
 // browser UI's hub state machine.
 //

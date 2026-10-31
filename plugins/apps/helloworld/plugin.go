@@ -1,7 +1,7 @@
 // Package helloworld is a minimal Nexus plugin that responds to
 // hello.request events with a configurable greeting. It serves as a
-// proof-of-concept for the bus bridge pattern and as a built-in
-// placeholder agent for desktop shell installations.
+// proof-of-concept for the bus bridge pattern and as a minimal
+// placeholder agent for embedders.
 package helloworld
 
 import (
@@ -84,7 +84,7 @@ func (p *Plugin) handleRequest(e engine.Event[any]) {
 		"message": message,
 	})
 
-	// Emit session title so the desktop shell can label this run.
+	// Emit session title so a host UI can label this run.
 	_ = p.bus.Emit("session.meta.title", map[string]any{
 		"title": message,
 	})

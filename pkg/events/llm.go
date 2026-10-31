@@ -438,8 +438,8 @@ type StreamHold struct {
 // transports that the text they have rendered for this turn is disowned.
 //
 // What a transport can do with it varies, and the difference is worth being
-// honest about. A transport that owns its render buffer (TUI, browser,
-// Wails) can erase the released prefix outright. A transport speaking a
+// honest about. A transport that owns its render buffer (TUI, browser)
+// can erase the released prefix outright. A transport speaking a
 // protocol with no retraction verb can only signal: nexus.io.agui emits an
 // AG-UI CustomEvent and closes the text message; nexus.io.a2a replaces the
 // streamed artifact in place, which the A2A artifact-update semantics

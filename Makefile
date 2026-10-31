@@ -7,8 +7,8 @@ GO=go
 YAEGI_WASM=pkg/engine/sandbox/wasm/yaegi.wasm.gz
 
 # cmd/nexus has no CGO deps (modernc.org/sqlite + chromem-go are pure Go).
-# Disabling CGO + stripping symbols cuts binary ~25%. Desktop builds (Wails)
-# require CGO and use a separate build path, not this Makefile.
+# Disabling CGO + stripping symbols cuts binary ~25%. Override CGO_ENABLED=1
+# only for an embedder binary that links a CGO dependency of its own.
 CGO_ENABLED ?= 0
 export CGO_ENABLED
 BUILD_LDFLAGS=-s -w

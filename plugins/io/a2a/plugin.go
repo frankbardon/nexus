@@ -12,7 +12,7 @@
 // The wire format is entirely pkg/a2a's; this package contributes the listener,
 // the credential guard, the card assembly and the routing. It is the A2A
 // sibling of nexus.io.agui and inherits that plugin's exemption from the
-// browser/wails transport parity rule (see .claude/docs/io-transport.md): an
+// Nexus UI transport parity rule (see .claude/docs/io-transport.md): an
 // external interop transport is not a Nexus UI.
 //
 // # Round-trip

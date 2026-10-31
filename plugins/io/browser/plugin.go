@@ -65,8 +65,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "plan.created"},
 		{EventType: "agent.plan"},
 		// Subagent lifecycle: bridged so orchestrator-style agents can
-		// surface per-worker progress in the UI. Mirrors the wails
-		// plugin's set (CLAUDE.md §7a parity rule).
+		// surface per-worker progress in the UI.
 		{EventType: "subagent.started"},
 		{EventType: "subagent.iteration"},
 		{EventType: "subagent.complete"},

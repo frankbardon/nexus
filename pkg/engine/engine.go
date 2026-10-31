@@ -244,8 +244,8 @@ func storageOptions(c StorageConfig) *storage.SQLiteOptions {
 // bus subscriptions, and starts the tick heartbeat. It returns as soon as the
 // engine is ready — it does not block.
 //
-// Boot is the embedder-facing entry point. Host processes (Wails, tests, other
-// Go binaries) call Boot, then select on SessionEnded() alongside their own
+// Boot is the embedder-facing entry point. Host processes (tests, other Go
+// binaries) call Boot, then select on SessionEnded() alongside their own
 // lifecycle signals, and finally call Stop. Boot never installs OS signal
 // handlers; that is the host's job.
 //
@@ -770,7 +770,7 @@ func (e *Engine) ReplaySession(ctx context.Context, sourceSessionID string) erro
 // Stop tears down the run-scoped state installed by Boot: the tick heartbeat,
 // run-scoped bus subscriptions, session metadata finalization, and plugin
 // shutdown in reverse dependency order. Stop is safe to call from a host's
-// shutdown hook (e.g. Wails OnShutdown).
+// shutdown hook (e.g. a GUI framework's on-shutdown callback).
 func (e *Engine) Stop(ctx context.Context) error {
 	if e.runCancel != nil {
 		e.runCancel()
@@ -1146,8 +1146,8 @@ func (e *Engine) Capabilities() map[string][]string {
 // + Stop. It installs SIGINT/SIGTERM handlers and blocks until one of them
 // fires, a plugin emits io.session.end, or the passed context is cancelled.
 //
-// Run is intended for the stock cmd/nexus binary. Embedders (Wails, tests,
-// other Go hosts) must call Boot and Stop directly and must not call Run,
+// Run is intended for the stock cmd/nexus binary. Embedders (tests, other Go
+// hosts) must call Boot and Stop directly and must not call Run,
 // because Run owns signals and blocking behavior that conflict with a host
 // process owning the lifecycle.
 func (e *Engine) Run(ctx context.Context) error {

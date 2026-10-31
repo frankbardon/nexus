@@ -46,7 +46,7 @@ type UserInput struct {
 	// and engine.SessionWorkspace.SetRequestHeaders for the parallel binding
 	// every web transport performs before emitting this event.
 	//
-	// Nil for a transport with no HTTP request behind it (TUI, oneshot, Wails)
+	// Nil for a transport with no HTTP request behind it (TUI, oneshot)
 	// and for a web request that carried no X-Nexus-* header. A handler must
 	// treat it as a hint from the caller, never as an authenticated claim:
 	// nothing verifies these values, which is why the engine binds them into

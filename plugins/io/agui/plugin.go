@@ -2,7 +2,7 @@
 // exposes the AG-UI ("Agent-User Interaction") endpoint. Clients POST a
 // RunAgentInput and receive a text/event-stream SSE response, one stream per
 // run. The wire format is defined by pkg/agui (not the pkg/ui Envelope used by
-// the browser/wails transports).
+// the browser transport).
 //
 // # Round-trip
 //
