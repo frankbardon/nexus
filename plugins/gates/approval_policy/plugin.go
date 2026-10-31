@@ -404,15 +404,15 @@ func llmRequestActionPayload(req *events.LLMRequest) map[string]any {
 }
 
 // llmRequestTurnID reads the agent turn an llm.request belongs to.
-// LLMRequest has no TurnID field; the turn rides Metadata["turn_id"], the
-// same key the planners stamp on their requests and that rag.citations and
-// io.voice read back off the response. Agent loops that run inside a turn
-// (nexus.agent.react) stamp it. Empty when the request names no turn.
+// LLMRequest has no TurnID field; the turn rides Metadata[engine.MetaTurnID].
+// Every agent loop stamps it (react, planexec, orchestrator, the dynamic
+// planner, and the nested subagent / delegate loops with their parent's turn).
+// Empty when the request names no turn.
 func llmRequestTurnID(req *events.LLMRequest) string {
 	if req == nil || req.Metadata == nil {
 		return ""
 	}
-	turnID, _ := req.Metadata["turn_id"].(string)
+	turnID, _ := req.Metadata[engine.MetaTurnID].(string)
 	return turnID
 }
 

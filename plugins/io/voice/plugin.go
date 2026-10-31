@@ -495,7 +495,7 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 
 	turnID := ""
 	if resp.Metadata != nil {
-		if tid, ok := resp.Metadata["turn_id"].(string); ok {
+		if tid, ok := resp.Metadata[engine.MetaTurnID].(string); ok {
 			turnID = tid
 		}
 	}

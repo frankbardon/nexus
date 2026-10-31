@@ -177,7 +177,7 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 	if !ok {
 		return
 	}
-	turnID, _ := resp.Metadata["turn_id"].(string)
+	turnID, _ := resp.Metadata[engine.MetaTurnID].(string)
 	if turnID == "" {
 		// Some upstream callers stash the turn under a different key. Be
 		// permissive — emit anyway with empty TurnID so renderers can use

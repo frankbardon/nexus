@@ -885,8 +885,8 @@ func (p *Plugin) sendLLMRequest() {
 			// no TurnID field, so request-time consumers read it here — the
 			// approval gate stamps it onto the HITLRequest an llm.request rule
 			// raises, which is what lets a turn-scoped transport resume the
-			// right turn (#218). Same key the planners stamp.
-			"turn_id": turnID,
+			// right turn (#218). Every agent loop stamps this key.
+			engine.MetaTurnID: turnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

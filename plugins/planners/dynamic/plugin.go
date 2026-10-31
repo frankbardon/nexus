@@ -233,6 +233,7 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 		Metadata: map[string]any{
 			"_source":           pluginID,
 			engine.MetaTaskKind: engine.TaskKindPlan,
+			engine.MetaTurnID:   req.TurnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

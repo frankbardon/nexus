@@ -225,6 +225,20 @@ const MetaSource = "_source"
 // internal sub-flow.
 const MetaTaskKind = "task_kind"
 
+// MetaTurnID is the LLMRequest.Metadata key naming the agent turn a request
+// serves. LLMRequest has no TurnID field, so request-time consumers read it
+// here: nexus.gate.approval_policy copies it onto the HITLRequest an
+// llm.request rule raises, which is what lets a turn-scoped transport
+// (nexus.io.agui) resume and finish the right run (#218). Providers echo
+// request metadata onto the response, so rag.citations and io.voice read it
+// back off llm.response.
+//
+// Every agent loop stamps it on every llm.request it publishes. A nested loop
+// (subagent, delegate) stamps the PARENT turn it is serving — the one whose
+// run is waiting on it — not its private tool-correlation turn id, since that
+// id names no turn a transport ever saw start.
+const MetaTurnID = "turn_id"
+
 // TaskKindCompaction is the task_kind nexus.memory.compaction stamps on its
 // summarisation request. It is a named constant because two sides must agree
 // on its spelling: the producer, and every consumer that recognises a

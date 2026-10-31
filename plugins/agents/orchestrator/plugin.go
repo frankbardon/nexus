@@ -473,6 +473,7 @@ func (p *Plugin) sendDecomposeRequest() {
 	messages = append(messages, p.history...)
 
 	maxSubtasks := p.maxSubtasks
+	turnID := p.currentTurnID
 	p.mu.Unlock()
 
 	// Append decomposition instruction.
@@ -508,6 +509,7 @@ func (p *Plugin) sendDecomposeRequest() {
 		Metadata: map[string]any{
 			"_source":           decomposeSource,
 			engine.MetaTaskKind: engine.TaskKindOrchestratorDecompose,
+			engine.MetaTurnID:   turnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
@@ -894,6 +896,7 @@ func (p *Plugin) sendSynthesizeRequest() {
 	messages = append(messages, p.history...)
 
 	synthesisRole := p.synthesisModelRole
+	turnID := p.currentTurnID
 	p.mu.Unlock()
 
 	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: synthesisRole,
@@ -902,6 +905,7 @@ func (p *Plugin) sendSynthesizeRequest() {
 		Metadata: map[string]any{
 			"_source":           synthesizeSource,
 			engine.MetaTaskKind: engine.TaskKindOrchestratorSynthesize,
+			engine.MetaTurnID:   turnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

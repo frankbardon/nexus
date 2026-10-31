@@ -306,6 +306,22 @@ wire values (cost records, router rules on `metadata.task_kind`) and do not
 change. A new kind gets a constant here, and an agent-loop kind must also be
 added to the turn table or every gate treats its turns as internal.
 
+**Every agent loop stamps `turn_id`.** `LLMRequest` has no `TurnID` field,
+so the turn a request serves rides `Metadata[engine.MetaTurnID]`
+(`"turn_id"`). `nexus.agent.react`, `nexus.agent.planexec` (step and
+synthesis), `nexus.agent.orchestrator` (decompose and synthesis) and
+`nexus.planner.dynamic` stamp their current turn on every `llm.request`
+they publish. The nested loops — `nexus.agent.subagent` and the
+`pkg/delegate` runtime — stamp the **parent** turn they serve, not their
+private `subagent_<id>` / `delegate_<id>` turn: that id only correlates
+the loop's own tool results and names no turn a transport ever saw
+start. `nexus.gate.approval_policy` copies the key onto the
+`HITLRequest.TurnID` an `llm.request` rule raises, and a turn-scoped
+transport (`nexus.io.agui`) only resumes and finishes a run whose turn
+it recognises (#218). Providers echo request metadata, so
+`nexus.rag.citations` and `nexus.io.voice` read the same key off
+`llm.response`. A new agent loop must stamp it too.
+
 **The one exception: fanout legs.** The fanout coordinator's per-provider legs
 are emitted directly with `EmitAsync`. Each leg is a copy of a request that is
 already inside the hop (fanout's own `before:llm.request` handler); offering

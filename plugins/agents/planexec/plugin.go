@@ -644,6 +644,7 @@ func (p *Plugin) sendStepLLMRequest() {
 
 	tools := make([]events.ToolDef, len(p.registeredTools))
 	copy(tools, p.registeredTools)
+	turnID := p.currentTurnID
 
 	p.mu.Unlock()
 
@@ -654,6 +655,7 @@ func (p *Plugin) sendStepLLMRequest() {
 		Metadata: map[string]any{
 			"_source":           executorSource,
 			engine.MetaTaskKind: engine.TaskKindPlanexecStep,
+			engine.MetaTurnID:   turnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
@@ -901,6 +903,7 @@ func (p *Plugin) sendSynthesisRequest() {
 
 	// Include the original conversation history for context.
 	messages = append(messages, p.history...)
+	turnID := p.currentTurnID
 
 	p.mu.Unlock()
 
@@ -910,6 +913,7 @@ func (p *Plugin) sendSynthesisRequest() {
 		Metadata: map[string]any{
 			"_source":           synthesizerSource,
 			engine.MetaTaskKind: engine.TaskKindPlanexecSynthesize,
+			engine.MetaTurnID:   turnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

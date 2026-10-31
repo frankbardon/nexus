@@ -30,8 +30,11 @@ through one event family:
 question. Every emitter that has a turn sets it: `ask_user` copies the
 asking tool call's turn, `nexus.gate.approval_policy` copies the gated
 tool call's turn (`tool.invoke` rules) or the request's
-`Metadata["turn_id"]` (`llm.request` rules — `nexus.agent.react` stamps
-it), the long-term memory plugin's `memory_write` approval copies the
+`Metadata["turn_id"]` (`engine.MetaTurnID`; `llm.request` rules — every
+agent loop stamps it: `nexus.agent.react`, `nexus.agent.planexec`,
+`nexus.agent.orchestrator`, and the nested subagent and delegate loops,
+which stamp the *parent* turn they serve rather than their private
+tool-correlation turn), the long-term memory plugin's `memory_write` approval copies the
 tool call's turn, and `nexus.agent.a2aremote` and the ICM workflow set
 the spawning loop's turn. Approvals raised outside any turn (a
 bus-driven memory store, a compaction commit, a vector write) leave it

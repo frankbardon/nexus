@@ -460,6 +460,11 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			Metadata: map[string]any{
 				"_source":           source,
 				engine.MetaTaskKind: engine.TaskKindSubagent,
+				// The parent turn this subagent serves, not turnID above:
+				// that one only correlates this loop's own tool results and
+				// names no turn any transport saw start. An approval raised
+				// on this request must resume the parent's run (#218).
+				engine.MetaTurnID: parentTurnID,
 			},
 			Tags: map[string]string{"source_plugin": defaultPluginID},
 		}

@@ -348,3 +348,46 @@ func TestRuntime_Run_ReplaysProviderContinuityMetadata(t *testing.T) {
 		t.Errorf("_source leaked onto a replayed message: %v", assistant.Metadata)
 	}
 }
+
+// TestRuntime_Run_StampsParentTurnID pins that every llm.request the delegated
+// loop publishes names the PARENT turn it serves in Metadata[engine.MetaTurnID],
+// not its private "delegate_<id>" tool-correlation turn. An approval rule on
+// the request copies that turn onto its HITLRequest, and a turn-scoped
+// transport only resumes a run whose turn it recognises (#218).
+func TestRuntime_Run_StampsParentTurnID(t *testing.T) {
+	bus := engine.NewEventBus()
+	var turnIDs []any
+	defer bus.Subscribe("llm.request", func(ev engine.Event[any]) {
+		if req, ok := ev.Payload.(events.LLMRequest); ok {
+			turnIDs = append(turnIDs, req.Metadata[engine.MetaTurnID])
+		}
+	}, engine.WithPriority(5))()
+	defer newFakeProvider(bus, "done")()
+
+	reg := posture.NewRegistry()
+	_ = reg.Register(posture.AgentPosture{
+		Name:          "analyst",
+		DefaultBudget: posture.ResourceBudget{Timeout: 5 * time.Second},
+	})
+	r := &Runtime{
+		Registry: reg,
+		Bus:      bus,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxDepth: 3,
+	}
+	if _, err := r.Run(context.Background(), Input{
+		Posture:    "analyst",
+		Task:       "Summarize.",
+		ParentTurn: "turn-parent",
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(turnIDs) == 0 {
+		t.Fatal("no llm.request observed")
+	}
+	for i, got := range turnIDs {
+		if got != "turn-parent" {
+			t.Errorf("llm.request[%d] Metadata[%q] = %v, want turn-parent", i, engine.MetaTurnID, got)
+		}
+	}
+}
