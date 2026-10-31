@@ -233,6 +233,54 @@ type eventBus struct {
 	// the test harness (WithFailFast) to surface stack traces from flaky
 	// tests rather than swallowing them as core.error events.
 	failFast bool
+
+	// capture, when non-nil, collects the unsubscribe func of every
+	// subscription made while it is set. Guarded by mu. The lifecycle
+	// manager opens a capture around each plugin's Init so it can remove
+	// what a plugin subscribed before its Init failed. See
+	// captureSubscriptions.
+	capture *[]func()
+}
+
+// subscriptionCapturer is implemented by buses that can record every
+// subscription made during a window. The lifecycle manager uses it to undo
+// the subscriptions of a plugin whose Init fails part-way: that plugin is
+// never shut down, so nothing else would remove them. A bus that does not
+// implement it simply gets no such cleanup.
+type subscriptionCapturer interface {
+	// captureSubscriptions starts recording and returns a stop func that
+	// ends the window and returns the unsubscribe func of every typed and
+	// wildcard subscription made while it was open, in subscription order.
+	// Windows do not nest; one is open at a time.
+	captureSubscriptions() (stop func() []func())
+}
+
+// captureSubscriptions implements subscriptionCapturer. The window is
+// bus-wide rather than goroutine-scoped, so a subscription another goroutine
+// makes while it is open is recorded too. That is safe for the one caller:
+// the recorded funcs are only run when the plugin's Init failed, and a failed
+// Init fails Boot, which tears down every other plugin as well.
+func (b *eventBus) captureSubscriptions() func() []func() {
+	recorded := []func(){}
+	b.mu.Lock()
+	b.capture = &recorded
+	b.mu.Unlock()
+	return func() []func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.capture == &recorded {
+			b.capture = nil
+		}
+		return recorded
+	}
+}
+
+// recordLocked appends unsub to the open capture window, if any. Callers
+// hold b.mu.
+func (b *eventBus) recordLocked(unsub func()) {
+	if b.capture != nil {
+		*b.capture = append(*b.capture, unsub)
+	}
 }
 
 // DefaultEventRingSize is the default capacity of the bus's in-memory
@@ -556,9 +604,7 @@ func (b *eventBus) Subscribe(eventType string, handler HandlerFunc, opts ...Subs
 		return b.handlers[eventType][i].priority < b.handlers[eventType][j].priority
 	})
 	subID := sub.id
-	b.mu.Unlock()
-
-	return func() {
+	unsub := func() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		subs := b.handlers[eventType]
@@ -569,6 +615,9 @@ func (b *eventBus) Subscribe(eventType string, handler HandlerFunc, opts ...Subs
 			}
 		}
 	}
+	b.recordLocked(unsub)
+	b.mu.Unlock()
+	return unsub
 }
 
 // HasSubscribers reports whether any typed handler is registered for an exact
@@ -647,19 +696,9 @@ func (b *eventBus) SubscribeAll(handler HandlerFunc) func() {
 		handler: handler,
 	}
 	b.wildcards = append(b.wildcards, sub)
-	subID := sub.id
+	unsub := b.wildcardUnsubLocked(sub.id)
 	b.mu.Unlock()
-
-	return func() {
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		for i, s := range b.wildcards {
-			if s.id == subID {
-				b.wildcards = append(b.wildcards[:i], b.wildcards[i+1:]...)
-				break
-			}
-		}
-	}
+	return unsub
 }
 
 func (b *eventBus) SubscribeAllReplay(handler HandlerFunc) func() {
@@ -673,7 +712,7 @@ func (b *eventBus) SubscribeAllReplay(handler HandlerFunc) func() {
 		handler: handler,
 	}
 	b.wildcards = append(b.wildcards, sub)
-	subID := sub.id
+	unsub := b.wildcardUnsubLocked(sub.id)
 	b.mu.Unlock()
 
 	// Replay buffered events outside the lock so a slow handler does not
@@ -683,7 +722,13 @@ func (b *eventBus) SubscribeAllReplay(handler HandlerFunc) func() {
 		handler(e)
 	}
 
-	return func() {
+	return unsub
+}
+
+// wildcardUnsubLocked builds the unsubscribe func for wildcard subID and
+// records it in any open capture window. Callers hold b.mu.
+func (b *eventBus) wildcardUnsubLocked(subID uint64) func() {
+	unsub := func() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		for i, s := range b.wildcards {
@@ -693,6 +738,8 @@ func (b *eventBus) SubscribeAllReplay(handler HandlerFunc) func() {
 			}
 		}
 	}
+	b.recordLocked(unsub)
+	return unsub
 }
 
 func (b *eventBus) Emit(eventType string, payload any) error {

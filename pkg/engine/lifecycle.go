@@ -216,7 +216,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 		}
 
 		lm.logger.Info("initializing plugin", "plugin", configuredID, "version", p.Version())
-		if err := p.Init(pctx); err != nil {
+		if err := lm.initPlugin(p, pctx); err != nil {
 			return fmt.Errorf("plugin %q init failed: %w", configuredID, err)
 		}
 		initialized = append(initialized, p)
@@ -252,6 +252,32 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 	_ = lm.bus.Emit("core.ready", nil)
 	lm.logger.Info("engine ready", "plugins", len(lm.plugins))
 	return nil
+}
+
+// initPlugin runs p.Init. When the bus supports it, every subscription made
+// during Init is recorded, and if Init returns an error those subscriptions
+// are removed before initPlugin returns. A plugin whose own Init fails is
+// never shut down — teardownFailedBoot only covers plugins whose Init
+// succeeded — so without this, handlers it subscribed before failing would
+// outlive the failed Boot and keep firing (#222). Plugins need no changes.
+func (lm *LifecycleManager) initPlugin(p Plugin, pctx PluginContext) error {
+	capturer, ok := lm.bus.(subscriptionCapturer)
+	if !ok {
+		return p.Init(pctx)
+	}
+	stop := capturer.captureSubscriptions()
+	err := p.Init(pctx)
+	unsubs := stop()
+	if err != nil {
+		for i := len(unsubs) - 1; i >= 0; i-- {
+			unsubs[i]()
+		}
+		if len(unsubs) > 0 {
+			lm.logger.Info("removed subscriptions of plugin whose init failed",
+				"plugin", pctx.PluginID, "subscriptions", len(unsubs))
+		}
+	}
+	return err
 }
 
 // teardownFailedBoot shuts down, in reverse init order, every plugin whose

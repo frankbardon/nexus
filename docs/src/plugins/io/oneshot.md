@@ -44,6 +44,11 @@ plugins:
 
 All fields are optional.
 
+The transcript is written when the agent finishes its turn, or on `Shutdown` if
+the run began (`core.ready` fired) but never finished, e.g. on a signal. If `Boot`
+fails, the engine still shuts the plugin down, but no transcript is written: the
+run never started, and the Boot error is the report.
+
 ## Usage
 
 ```bash

@@ -326,3 +326,71 @@ func (p *panickyShutdown) Shutdown(context.Context) error {
 	p.called = true
 	panic("shutdown before ready")
 }
+
+// partialInitPlugin subscribes typed and wildcard handlers, then fails its
+// own Init. It is never shut down, so only the engine can remove them.
+type partialInitPlugin struct {
+	subscriberPlugin
+	fired *int
+}
+
+func (p *partialInitPlugin) Init(ctx PluginContext) error {
+	ctx.Bus.Subscribe(p.event, func(Event[any]) { *p.fired++ })
+	ctx.Bus.SubscribeAll(func(e Event[any]) {
+		if e.Type == p.event {
+			*p.fired++
+		}
+	})
+	return errors.New("forced init failure after subscribing")
+}
+
+// A plugin whose own Init fails after subscribing part-way has those
+// subscriptions removed by the engine (#222): after the Boot error, emitting
+// the event reaches none of its handlers and the handler table is back to
+// its pre-Boot shape. A plugin Init'd before it keeps working until its own
+// Shutdown, which teardownFailedBoot runs.
+func TestBoot_OwnInitFailureRemovesItsSubscriptions(t *testing.T) {
+	const evt = "test.boot_teardown.partial"
+	fired := 0
+	a := &subscriberPlugin{id: "nexus.test.pre"}
+	p := &partialInitPlugin{
+		subscriberPlugin: subscriberPlugin{id: "nexus.test.partial", deps: []string{"nexus.test.pre"}, event: evt},
+		fired:            &fired,
+	}
+	eng := newBootRetryEngineMulti(t, a, p)
+	before := busSubscriptionCounts(t, eng.Bus)
+
+	err := eng.Boot(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "forced init failure after subscribing") {
+		t.Fatalf("Boot err = %v, want the forced init failure", err)
+	}
+	if p.shutdowns != 0 {
+		t.Fatalf("failing plugin Shutdown calls = %d, want 0", p.shutdowns)
+	}
+	if a.shutdowns != 1 {
+		t.Fatalf("earlier plugin Shutdown calls = %d, want 1", a.shutdowns)
+	}
+
+	_ = eng.Bus.Emit(evt, nil)
+	if fired != 0 {
+		t.Fatalf("handlers of the plugin whose Init failed fired %d times after Boot error, want 0", fired)
+	}
+	if got := busSubscriptionCounts(t, eng.Bus); !equalCounts(got, before) {
+		t.Fatalf("subscriptions after failed Boot = %v, want pre-Boot %v", got, before)
+	}
+}
+
+// Subscriptions made during a successful Init are left alone: the capture
+// window only ever undoes a failed Init.
+func TestBoot_SuccessfulInitKeepsSubscriptions(t *testing.T) {
+	const evt = "test.boot_teardown.kept"
+	p := &subscriberPlugin{id: "nexus.test.kept", event: evt}
+	eng := newBootRetryEngineMulti(t, p)
+	if err := eng.Boot(context.Background()); err != nil {
+		t.Fatalf("Boot: %v", err)
+	}
+	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
+	if n := busSubscriptionCounts(t, eng.Bus)[evt]; n != 1 {
+		t.Fatalf("subscriptions on %s after Boot = %d, want 1", evt, n)
+	}
+}

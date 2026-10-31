@@ -772,9 +772,13 @@ func (e *Engine) Stop(ctx context.Context) error {
 		return fmt.Errorf("shutdown failed: %w", err)
 	}
 
-	// Close the journal last so any teardown events (plugin Shutdown,
-	// session.end finalization) reach disk. Use a short-deadline context
-	// so a stuck drain cannot block engine shutdown indefinitely.
+	// Close the journal after plugin Shutdown so every envelope already
+	// queued is drained to disk. Teardown events are NOT recorded: the
+	// journal's wildcard subscription is run-scoped, so unsubscribeRunScoped
+	// at the top of Stop removed it before EndSession and plugin Shutdown
+	// emitted anything. The journal ends at the last event before Stop. Use
+	// a short-deadline context so a stuck drain cannot block engine shutdown
+	// indefinitely.
 	//
 	// The writer is kept in a local so the shutdown snapshot below can still
 	// capture its segments: a closed writer is the ideal thing to snapshot,
