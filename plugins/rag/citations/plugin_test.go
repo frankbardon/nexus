@@ -212,4 +212,9 @@ func TestPromptSectionRegistered(t *testing.T) {
 	if !strings.Contains(out, "<cite") {
 		t.Fatalf("prompt section missing <cite tag instruction: %s", out)
 	}
+	// Recalled-memory items share sources (e.g. "compaction"), so the
+	// contract must teach the doc attribute that names one item.
+	if !strings.Contains(out, `doc="<doc>"`) || !strings.Contains(out, "recalled_memory") {
+		t.Fatalf("prompt section does not teach doc= for recalled items: %s", out)
+	}
 }

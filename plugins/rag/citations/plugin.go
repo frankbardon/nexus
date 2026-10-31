@@ -383,7 +383,14 @@ relies on it:
   <cite source="<source path or url>" chunk="<chunk_idx>"/>
 
 The source and chunk values must match the metadata of a chunk that was
-returned by knowledge_search or memory recall during this turn. Do not
-fabricate citations. Citations without retrieval evidence will be stripped.
+returned by knowledge_search or memory recall during this turn. When the
+retrieved item carries a doc attribute (each <recalled_memory> item does),
+add doc="<doc>" with that exact value so the citation names that one item
+rather than every item sharing its source:
+
+  <cite source="<source>" doc="<doc>"/>
+
+Do not fabricate citations. Citations without retrieval evidence will be
+stripped.
 </citation_contract>`
 }

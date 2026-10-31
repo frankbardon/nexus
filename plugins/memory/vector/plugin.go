@@ -551,8 +551,15 @@ func (p *Plugin) buildPromptSection() string {
 	b.WriteString("These items were recalled from your vector memory based on the current user message. ")
 	b.WriteString("Use them if relevant; ignore them if not.\n\n")
 	for i, m := range matches {
-		fmt.Fprintf(&b, "  <item rank=\"%d\" similarity=\"%.3f\" source=\"%s\">\n",
-			i+1, m.Similarity, m.Metadata["source"])
+		// doc carries the entry's ID — the same value announced as
+		// RetrievedChunk.DocID — so a <cite doc="..."/> names one recalled
+		// entry even when several share a source (e.g. "compaction").
+		fmt.Fprintf(&b, "  <item rank=\"%d\" similarity=\"%.3f\" source=\"%s\" doc=\"%s\"",
+			i+1, m.Similarity, engine.XMLEscape(m.Metadata["source"]), engine.XMLEscape(m.ID))
+		if c := m.Metadata["chunk_idx"]; c != "" {
+			fmt.Fprintf(&b, " chunk=\"%s\"", engine.XMLEscape(c))
+		}
+		b.WriteString(">\n")
 		b.WriteString("    ")
 		b.WriteString(strings.ReplaceAll(m.Content, "\n", "\n    "))
 		b.WriteString("\n  </item>\n")

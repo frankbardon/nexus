@@ -3459,7 +3459,7 @@ footnote.
 | Key                | Type   | Default | Description |
 |--------------------|--------|---------|-------------|
 | `mode`             | string | `auto`  | Citation source: `tag` (parses `<cite source="..." chunk="N"/>` markers), `anthropic_native` (reads `LLMResponse.Citations[]` populated by Anthropic), or `auto` (uses native when present, falls back to tag). |
-| `strict`           | bool   | `true`  | When true, citations whose `(source, chunk)` does not match a chunk recorded in the current turn's retrieval context are dropped. When false, they are kept and tagged with `TrustTier="unverified"`. |
+| `strict`           | bool   | `true`  | When true, citations whose `(source, doc, chunk)` does not match a chunk recorded in the current turn's retrieval context are dropped (an attribute absent on either side is a wildcard). When false, they are kept and tagged with `TrustTier="unverified"`. |
 | `section_priority` | int    | `60`    | Priority of the citation-contract section in the system prompt (only used in tag/auto modes). |
 
 Subscribes to `rag.retrieved` (emitted by `nexus.tool.knowledge_search` and
@@ -3467,7 +3467,10 @@ Subscribes to `rag.retrieved` (emitted by `nexus.tool.knowledge_search` and
 `llm.response` to do the parsing. Emits `llm.response.cited`. Vector recall
 runs on `io.input`, before the turn exists, so `nexus.memory.vector` announces
 its hits on `agent.turn.start`, keyed by that turn; a turnless
-`rag.retrieved` is ignored.
+`rag.retrieved` is ignored. The citation contract also teaches an optional
+`doc="<doc>"` attribute: each `<recalled_memory>` item renders `doc` (the
+entry's ID), so a cite can name one recalled entry when several share a
+`source` such as `compaction`.
 
 Inside a nested loop (`nexus.agent.subagent`, `pkg/delegate`) a response is
 validated against the retrievals that loop's own tool calls made — keyed by
