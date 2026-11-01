@@ -157,6 +157,10 @@ type Plugin struct {
 	// the content handlers tell those apart from the synthetic sub-turn ids a
 	// delegated remote legitimately publishes under. See runAcceptsTurnEvent.
 	retiredTurn string
+	// parked is the turn the last interrupt parked, holding the client-tool
+	// calls and questions it made after that, for later continuation runs
+	// (parked.go). Guarded by mu.
+	parked *parkedTurn
 
 	// pendingMu guards pending. A virtual-run interrupt records the mapping
 	// from the AG-UI interruptId to the underlying HITL request so the resume
@@ -627,25 +631,7 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 // a park), and the trailing events it emits carry a turn id the next run never
 // saw start. See runAcceptsTurnEvent.
 func (p *Plugin) endRun(r *run) {
-	// Read the run's turn before taking p.mu: r.boundTurn takes r's own lock,
-	// and this package never nests the two.
-	var retired string
-	if r != nil {
-		retired = r.boundTurn()
-	}
-
-	p.mu.Lock()
-	if p.active == r {
-		p.active = nil
-	}
-	// Only a run that actually bound a turn overwrites the record. A run
-	// released without one (an input vetoed before any agent ran, a refused
-	// resume) has no trailing events to disown, and letting it clear the field
-	// would forget a predecessor whose turn is still live.
-	if retired != "" {
-		p.retiredTurn = retired
-	}
-	p.mu.Unlock()
+	p.releaseRun(r, nil)
 }
 
 // runOwnsTurnEnd reports whether an agent.turn.end naming turnID is r's own
@@ -1061,6 +1047,7 @@ func (p *Plugin) handleTurnEnd(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	p.dropParked(t.TurnID)
 
 	p.mu.Lock()
 	r := p.active
@@ -1193,12 +1180,18 @@ func (p *Plugin) handleOutput(e engine.Event[any]) {
 // server-side Nexus catalog tool is left untouched: its own handler runs inline
 // and produces the tool.result that streams via handleToolResult.
 func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
-	r := p.currentRun()
-	if r == nil {
-		return
-	}
 	tc, ok := e.Payload.(events.ToolCall)
 	if !ok {
+		return
+	}
+	r := p.currentRun()
+	if r == nil {
+		// A later client-tool call of the response whose earlier call (or
+		// question) parked the turn: deliver it on a continuation run.
+		if p.deferToolInvoke(tc) {
+			p.logger.Info("agui deferred a client tool behind the parked turn's interrupt",
+				"tool", tc.Name, "tool_call_id", tc.ID, "turn_id", tc.TurnID)
+		}
 		return
 	}
 	// A tool call belonging to a turn this run does not carry must not be
@@ -1229,7 +1222,7 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	if !p.isClientTool(r, tc.Name) {
 		return
 	}
-	p.suspendForClientTool(r, tc)
+	p.suspendForClientTool(r, tc, nil)
 }
 
 // handleLLMResponse records the iteration's provider continuity metadata on the

@@ -53,6 +53,13 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 	}
 	r := p.currentRun()
 	if r == nil {
+		// A question the parked turn asked after its earlier interrupt (an
+		// approval gate on the response's next tool call): deliver it on a
+		// continuation run instead of leaving the gate blocked on nobody.
+		if p.deferHITL(req) {
+			p.logger.Info("agui deferred a question behind the parked turn's interrupt",
+				"request_id", req.ID, "turn_id", req.TurnID)
+		}
 		return
 	}
 	if !p.runAcceptsTurnEvent(r, req.TurnID) {
@@ -65,7 +72,12 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 		)
 		return
 	}
+	p.interruptForHITL(r, req, nil)
+}
 
+// interruptForHITL ends run r with req's interrupt and parks the turn,
+// carrying the deferred items still to deliver.
+func (p *Plugin) interruptForHITL(r *run, req events.HITLRequest, carry []deferredItem) {
 	interruptID := newInterruptID()
 
 	// Record the correlation BEFORE ending the stream so a fast resume POST can
@@ -87,7 +99,7 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 	r.interrupt(snapshot, r.snapshotMessages(), payload)
 	// Clear the active-run pointer: the stream is done, but the agent remains
 	// blocked in-process on the pending hitl.
-	p.endRun(r)
+	p.releaseRun(r, parkFor(r, req.TurnID, carry))
 
 	p.logger.Info("agui run interrupted for hitl",
 		"interrupt_id", interruptID,
@@ -132,6 +144,10 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 func (p *Plugin) handleHITLCancel(e engine.Event[any]) {
 	c, ok := e.Payload.(events.HITLCancel)
 	if !ok {
+		return
+	}
+	// A deferred question was never shown: retracting it touches no run.
+	if p.dropDeferredHITL(c.RequestID) {
 		return
 	}
 

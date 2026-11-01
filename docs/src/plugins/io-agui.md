@@ -150,6 +150,23 @@ inline and produces the `tool.result` that streams as a normal `TOOL_CALL_RESULT
 Client tools are distinguished purely by **origin** (they came from
 `RunAgentInput.tools`).
 
+**Several interrupts from one LLM response.** One response may call several
+tools, and the agent dispatches them back to back, so the first client tool (or
+approval question) ends the run while the agent still has the rest to dispatch.
+The later client-tool calls and `hitl.requested` questions of that turn are
+**deferred** onto the parked turn, in order, and delivered one per continuation
+run: the resume of the first interrupt emits its answer, then the next deferred
+item ends the continuation run with its own `RUN_FINISHED(interrupt)` (a deferred
+client tool streams its `TOOL_CALL_START/ARGS/END` there, on the run that carries
+it). Every run still ends with a single interrupt, so a client that handles one
+client tool or question at a time handles several unchanged. While the turn is
+parked its run's client tools stay offered in `tool.catalog.query`, so a deferred
+call is never answered `unknown tool`. A `cancelled` resume cancels everything
+deferred behind it as well (each client tool gets the cancelled error result,
+each question a cancelled response), and a `hitl.cancel` for a deferred question
+just drops it. Deferred items are not pending interrupts: a resume addresses
+only the interrupt it was shown.
+
 A tool call that is **neither** — not a server tool and not advertised by the
 current run (a hallucinated name, or a client tool from an earlier run) — does
 not suspend the run and does not hang it: `nexus.tool.catalog` answers the

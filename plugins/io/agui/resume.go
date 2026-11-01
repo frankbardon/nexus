@@ -68,6 +68,17 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	p.active = r
 	p.mu.Unlock()
 
+	// The parked turn's deferred items (parked.go) are this resume's to
+	// deliver once its answers are in. Taken after the run holds the slot:
+	// from here on nothing more can be deferred onto the turn.
+	parked := p.takeParked(input.threadID, items[0].pending.TurnID)
+	cancelled := false
+	for _, m := range items {
+		if m.item.Status == agui.ResumeCancelled {
+			cancelled = true
+		}
+	}
+
 	// Re-bind identity/context BEFORE the hitl.responded/tool.result goroutine
 	// below unblocks the parked agent — same "register before unblocking"
 	// discipline as the run registration above. This request's own resolved
@@ -134,6 +145,9 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 				"run_id", input.runID,
 				"status", string(m.item.Status),
 			)
+		}
+		if parked != nil {
+			p.deliverDeferred(r, parked.queue, cancelled)
 		}
 	}()
 
