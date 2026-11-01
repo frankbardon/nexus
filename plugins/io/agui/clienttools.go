@@ -23,6 +23,11 @@ func (p *Plugin) handleCatalogQuery(e engine.Event[any]) {
 		return
 	}
 	r := p.currentRun()
+	if r == nil {
+		// A parked turn's run still offers its client tools: a call the
+		// turn makes after the park is deferred, not unknown (parked.go).
+		r = p.parkedRun()
+	}
 	if r == nil || len(r.clientTools) == 0 {
 		return
 	}
@@ -58,7 +63,8 @@ func (p *Plugin) isClientTool(r *run, name string) bool {
 // StateSnapshot + MessagesSnapshot then a RunFinished(interrupt) whose payload
 // names the tool call awaiting a result, and record a pending client-tool
 // interrupt so the resume path can feed the result back to the parked agent.
-func (p *Plugin) suspendForClientTool(r *run, tc events.ToolCall) {
+// The turn is parked carrying the deferred items still to deliver.
+func (p *Plugin) suspendForClientTool(r *run, tc events.ToolCall, carry []deferredItem) {
 	interruptID := newInterruptID()
 
 	// Record the correlation BEFORE ending the stream so a fast resume POST can
@@ -79,7 +85,7 @@ func (p *Plugin) suspendForClientTool(r *run, tc events.ToolCall) {
 	snapshot := p.buildClientToolState(r, interruptID, tc)
 	payload := buildClientToolInterrupt(interruptID, tc)
 	r.interrupt(snapshot, r.snapshotMessages(), payload)
-	p.endRun(r)
+	p.releaseRun(r, parkFor(r, tc.TurnID, carry))
 
 	p.logger.Info("agui run interrupted for client tool",
 		"interrupt_id", interruptID,
