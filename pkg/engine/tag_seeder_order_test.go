@@ -10,9 +10,11 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -113,11 +115,13 @@ plugins:
 			t.Fatalf("leg %d tags = %v, want parent's seeded tags", i, leg.Tags)
 		}
 	}
-	legs[0].Tags["probe"] = "x"
-	if _, leaked := legs[1].Tags["probe"]; leaked {
+	// Compare map identity rather than writing a probe key: these maps are
+	// live event payloads the journal writer may still be marshaling on its
+	// drain goroutine, so mutating one here is a data race.
+	if mapID(legs[0].Tags) == mapID(legs[1].Tags) {
 		t.Fatal("fanout legs share one tag map")
 	}
-	if _, leaked := res.Request.Tags["probe"]; leaked {
+	if mapID(legs[0].Tags) == mapID(res.Request.Tags) || mapID(legs[1].Tags) == mapID(res.Request.Tags) {
 		t.Fatal("fanout leg aliases the parent's tag map")
 	}
 }
@@ -197,3 +201,6 @@ plugins:
 		t.Fatal("mock response not published")
 	}
 }
+
+// mapID is a map's identity: two values with the same mapID are one map.
+func mapID(m map[string]string) unsafe.Pointer { return reflect.ValueOf(m).UnsafePointer() }
