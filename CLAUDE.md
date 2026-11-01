@@ -155,6 +155,7 @@ plugins/
   observe/otel/          # OpenTelemetry trace export via OTLP
   observe/thinking/      # Thinking step persistence (JSONL) — bus-driven, also visible in journal
   observe/sampler/       # Online journal sampler — opt-in, FS-only
+  observe/tap/           # Read-only off-process bus tap: SSE stream of journal envelopes (SubscribeAllReplay, emits nothing, can't veto); consumer picks backfill=none|ring|journal per connection, resumes via Last-Event-ID = <epoch>:<cursor> (arrival order, NOT seq order — nested emits reach wildcards child-first); bounded per-client queue, overflow disconnects; optional nexusauth chain, loopback default
   planners/dynamic/      # LLM-generated execution plans
   planners/static/       # Config-defined fixed execution plans
   skills/                # Skill discovery and catalog

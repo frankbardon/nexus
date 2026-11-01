@@ -4503,6 +4503,33 @@ the hook for future PII scrubbing. v1 ships only the `IdentityRedactor`
 > as-is in v1 — handling them transparently requires zstd round-trips
 > that are deferred to a follow-up.
 
+### `nexus.observe.tap`
+
+Source: `plugins/observe/tap/plugin.go`. Read-only SSE stream of every bus
+event as a journal envelope, for consumers outside the process. Runs only when
+listed in `plugins.active`. Per-connection choices (`types`, `exclude`,
+`backfill=none|ring|journal`, `since_seq`, `Last-Event-ID`) are query
+parameters, not config — see [Event Bus Tap](../plugins/observers/tap.md).
+
+```yaml
+plugins:
+  active:
+    - nexus.observe.tap
+
+  nexus.observe.tap:
+    bind: 127.0.0.1:8095
+```
+
+| Key                  | Type     | Default          | Description |
+|----------------------|----------|------------------|-------------|
+| `bind`               | string   | `127.0.0.1:8095` | Listener address. |
+| `auth`               | map      | *(absent)*       | `pkg/nexusauth` validator chain (same shape as `nexus.io.agui`). Absent admits every caller. Unknown keys abort boot. |
+| `include_events`     | list     | *(empty = all)*  | Operator ceiling: only these types are streamed. Exact type or trailing `*` prefix (`llm.*`, `before:*`, `*`). |
+| `exclude_events`     | list     | *(empty)*        | Operator ceiling: these types are never streamed (never marshaled). Same patterns. |
+| `ring_size`          | int      | `8192`           | Frames held in memory for `Last-Event-ID` resume and ring/journal backfill. Must be positive. |
+| `client_buffer`      | int      | `1024`           | Per-client queue depth; a client this far behind is disconnected with an `overflow` frame. Must be positive. |
+| `heartbeat_interval` | duration | `15s`            | SSE keepalive comment interval. `0` disables; an unparseable value is a boot error. |
+
 ---
 
 ## Planners

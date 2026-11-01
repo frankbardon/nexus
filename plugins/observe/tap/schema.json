@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.observe.tap.json",
+  "title": "nexus.observe.tap",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "bind":               {"type": "string",  "description": "Listener address. Defaults to 127.0.0.1:8095."},
+    "auth":               {"type": "object",  "description": "nexusauth validator-chain block (same shape as nexus.io.agui and the broker). Absent means every caller is admitted."},
+    "include_events":     {"type": "array", "items": {"type": "string"}, "description": "Operator ceiling: only these types are streamed. Exact type, or a trailing * for a prefix match (llm.*, before:*, *). Empty means all."},
+    "exclude_events":     {"type": "array", "items": {"type": "string"}, "description": "Operator ceiling: these types are never streamed. Exact type, or a trailing * for a prefix match (llm.*, before:*, *)."},
+    "ring_size":          {"type": "integer", "minimum": 1, "description": "Frames held in memory for resume and ring backfill. Defaults to 8192."},
+    "client_buffer":      {"type": "integer", "minimum": 1, "description": "Per-client queue depth; a client that falls this far behind is disconnected with an overflow frame. Defaults to 1024."},
+    "heartbeat_interval": {"type": "string",  "description": "SSE keepalive comment interval (Go duration). Defaults to 15s; 0 disables."}
+  }
+}

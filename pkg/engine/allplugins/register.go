@@ -55,6 +55,7 @@ import (
 	// Observer plugins.
 	otelplugin "github.com/frankbardon/nexus/plugins/observe/otel"
 	samplerplugin "github.com/frankbardon/nexus/plugins/observe/sampler"
+	tapplugin "github.com/frankbardon/nexus/plugins/observe/tap"
 	thinkingplugin "github.com/frankbardon/nexus/plugins/observe/thinking"
 
 	// Planner plugins.
@@ -197,6 +198,8 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// Sampler is registered but off by default — only fires when
 	// `nexus.observe.sampler` is in plugins.active and `enabled: true`.
 	r.Register("nexus.observe.sampler", samplerplugin.New)
+	// Tap binds a listener, so it only runs when listed in plugins.active.
+	r.Register("nexus.observe.tap", tapplugin.New)
 
 	// Planners
 	r.Register("nexus.planner.dynamic", dynamicplanner.New)

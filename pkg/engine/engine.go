@@ -1082,7 +1082,7 @@ func (e *Engine) startJournal() error {
 		if excluder != nil && excluder.IsExcluded(ev.Type) {
 			return
 		}
-		env := buildEnvelope(ev, bus.CurrentSeq(), bus.ParentSeq())
+		env := BuildEnvelope(ev, bus.CurrentSeq(), bus.ParentSeq())
 		w.Append(env)
 	})
 	// Not run-scoped: kept until closeJournal so teardown is journaled.
@@ -1090,10 +1090,16 @@ func (e *Engine) startJournal() error {
 	return nil
 }
 
-// buildEnvelope materializes the on-disk record from an in-flight event.
+// BuildEnvelope materializes the on-disk record from an in-flight event.
 // Detects vetoable events via the *VetoablePayload wrapper so the journal
 // records the veto outcome without a separate envelope.
-func buildEnvelope(ev Event[any], seq, parentSeq uint64) *journal.Envelope {
+//
+// Exported so wildcard observers that ship events off-process
+// (nexus.observe.tap) emit exactly the shape the journal stores: a consumer
+// reading the file and one reading the stream parse one record. seq and
+// parentSeq are fallbacks only — pass the bus's journal.SeqSource values when
+// the bus implements it, zeros otherwise.
+func BuildEnvelope(ev Event[any], seq, parentSeq uint64) *journal.Envelope {
 	// Prefer values from ev.Causation when populated — the bus auto-fills
 	// them on EmitEvent/EmitVetoable so handlers see the same chain replay
 	// will reconstruct. Fall back to the wildcard-context seqs only when
