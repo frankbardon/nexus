@@ -7,7 +7,7 @@ module github.com/frankbardon/nexus/modules/objectstore-s3
 go 1.26.0
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.47.1
+	github.com/aws/aws-sdk-go-v2 v1.47.5
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
 	// Pinned to the newest core release rather than a v0.0.0 placeholder, so a
@@ -32,7 +32,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.1 // indirect
-	github.com/aws/smithy-go v1.28.1 // indirect
+	github.com/aws/smithy-go v1.28.7 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
