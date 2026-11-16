@@ -328,3 +328,74 @@ func TestClientToolDefAwaitsHuman(t *testing.T) {
 		t.Fatalf("client tool def Tags = %v, want %q", td.Tags, events.ToolTagAwaitsHuman)
 	}
 }
+
+// TestResumeDropsPendingBeforeUnblocking: the answered interrupt is gone
+// from the pending map by the time its tool.result unblocks the agent.
+// The agent can reach its next client tool at once (a fast model) and the
+// client can answer that before the resume goroutine runs again; were the
+// answered interrupt still recorded then, the next resume would address 1
+// of 2 open interrupts and be refused as partial.
+func TestResumeDropsPendingBeforeUnblocking(t *testing.T) {
+	p, bus, url := newTestPlugin(t)
+
+	stillPending := make(chan bool, 1)
+	toolResult := make(chan struct{}, 1)
+	bus.Subscribe("tool.result", func(e engine.Event[any]) {
+		r, ok := e.Payload.(events.ToolResult)
+		if !ok || r.ID != "call-a" {
+			return
+		}
+		p.pendingMu.Lock()
+		n := len(p.pending)
+		p.pendingMu.Unlock()
+		stillPending <- n > 0
+		toolResult <- struct{}{}
+	})
+	inputSeen := make(chan struct{}, 1)
+	bus.Subscribe("io.input", func(engine.Event[any]) {
+		select {
+		case inputSeen <- struct{}{}:
+		default:
+		}
+	})
+	go func() {
+		<-inputSeen
+		turn := events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: "turn-a"}
+		_ = bus.Emit("agent.turn.start", turn)
+		_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-a", Name: "probe", Arguments: map[string]any{}, TurnID: "turn-a"})
+		<-toolResult
+		_ = bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "done", Role: "assistant"})
+		_ = bus.Emit("agent.turn.end", turn)
+	}()
+
+	body1 := `{"threadId":"thread-p","runId":"run-1","messages":[{"id":"m1","role":"user","content":"go"}],` +
+		`"tools":[{"name":"probe","description":"probe","parameters":{"type":"object"}}]}`
+	resp1 := post(t, url, "", "", body1)
+	defer resp1.Body.Close()
+	evs1, err := agui.NewSSEReader(resp1.Body).ReadAll()
+	if err != nil {
+		t.Fatalf("read run1 sse: %v", err)
+	}
+	var ip agui.Interrupt
+	for _, e := range evs1 {
+		if fe, ok := e.(*agui.RunFinishedEvent); ok && fe.Outcome == agui.OutcomeInterrupt {
+			if err := json.Unmarshal(fe.Result, &ip); err != nil {
+				t.Fatalf("decode interrupt: %v", err)
+			}
+		}
+	}
+	if ip.InterruptID == "" {
+		t.Fatalf("run1 did not interrupt (events=%v)", eventTypes(evs1))
+	}
+	waitFor(t, func() bool { return p.currentRun() == nil })
+
+	body2 := `{"threadId":"thread-p","runId":"run-2","resume":[{"interruptId":"` + ip.InterruptID + `","status":"resolved","payload":{"output":"ok"}}]}`
+	resp2 := post(t, url, "", "", body2)
+	defer resp2.Body.Close()
+	if _, err := agui.NewSSEReader(resp2.Body).ReadAll(); err != nil {
+		t.Fatalf("read run2 sse: %v", err)
+	}
+	if <-stillPending {
+		t.Fatal("the answered interrupt was still pending when its tool.result unblocked the agent")
+	}
+}

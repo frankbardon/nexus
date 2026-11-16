@@ -105,11 +105,21 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	// shared-state is disabled).
 	p.emitInitialSnapshot(r)
 
-	// Resolve each interrupt, then drop the pending mapping. A HITL interrupt
-	// emits hitl.responded to unblock the waiter; a client-tool interrupt emits
-	// the tool.result the parked agent is waiting on. Emission is asynchronous so
-	// this handler returns promptly and the HTTP goroutine can start draining the
-	// run channel.
+	// Drop the pending mappings BEFORE anything unblocks the agent: once the
+	// parked turn resumes it can reach its next interrupt (a client tool, a
+	// question) and the client can answer that one before the goroutine below
+	// is scheduled again. Deleted later, an answered interrupt would still
+	// count as open and that next resume would be refused as partial.
+	p.pendingMu.Lock()
+	for _, m := range items {
+		delete(p.pending, m.pending.InterruptID)
+	}
+	p.pendingMu.Unlock()
+
+	// Resolve each interrupt. A HITL interrupt emits hitl.responded to unblock
+	// the waiter; a client-tool interrupt emits the tool.result the parked agent
+	// is waiting on. Emission is asynchronous so this handler returns promptly
+	// and the HTTP goroutine can start draining the run channel.
 	go func() {
 		for _, m := range items {
 			switch m.pending.Kind {
@@ -133,10 +143,6 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 					)
 				}
 			}
-			p.pendingMu.Lock()
-			delete(p.pending, m.pending.InterruptID)
-			p.pendingMu.Unlock()
-
 			p.logger.Info("agui interrupt resumed",
 				"interrupt_id", m.pending.InterruptID,
 				"request_id", m.pending.RequestID,
