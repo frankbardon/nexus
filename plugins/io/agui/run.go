@@ -244,6 +244,13 @@ func (r *run) fail(msg string) bool {
 	return closed
 }
 
+// markSuspended records that the run is ending by deliberate suspension.
+func (r *run) markSuspended() {
+	r.mu.Lock()
+	r.suspended = true
+	r.mu.Unlock()
+}
+
 // isSuspended reports whether the run ended — or is in the act of ending — by
 // deliberate suspension rather than stream death.
 func (r *run) isSuspended() bool {
@@ -302,9 +309,7 @@ func (r *run) interrupt(snapshot []byte, messages []agui.Message, payload agui.I
 	// disconnect racing this park can win the close, and the disconnect path
 	// must still see that the agent was parked on purpose and leave it alone
 	// rather than cancelling a turn a human is expected to answer.
-	r.mu.Lock()
-	r.suspended = true
-	r.mu.Unlock()
+	r.markSuspended()
 
 	r.closeOne.Do(func() {
 		if snapshot == nil {

@@ -1,6 +1,7 @@
 package agui
 
 import (
+	"github.com/frankbardon/nexus/pkg/agui"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -46,6 +47,9 @@ type deferredItem struct {
 // records the turn as parked under the same lock, so no event can land in
 // between and meet neither an active run nor a parked turn.
 func (p *Plugin) releaseRun(r *run, park *parkedTurn) {
+	if p.releaseHook != nil {
+		p.releaseHook(r, park)
+	}
 	// Read the run's turn before taking p.mu: r.boundTurn takes r's own lock,
 	// and this package never nests the two.
 	var retired string
@@ -68,6 +72,20 @@ func (p *Plugin) releaseRun(r *run, park *parkedTurn) {
 		p.parked = park
 	}
 	p.mu.Unlock()
+}
+
+// suspendRun ends run r with an interrupt and parks turnID on it. The slot
+// is released and the turn parked BEFORE the stream closes: the client may
+// answer the interrupt as soon as it reads RunFinished, and its resume must
+// find the slot free (else "a run is already in flight") and the parked
+// turn recorded (else the deferred items behind the interrupt are lost).
+// The run is marked suspended first, so a disconnect that closes the stream
+// in between still reads as a deliberate park and leaves the agent alone.
+func (p *Plugin) suspendRun(r *run, turnID string, carry []deferredItem, snapshot []byte, payload agui.Interrupt) {
+	messages := r.snapshotMessages()
+	r.markSuspended()
+	p.releaseRun(r, parkFor(r, turnID, carry))
+	r.interrupt(snapshot, messages, payload)
 }
 
 // parkFor builds the parked-turn record for run r suspending turnID,
