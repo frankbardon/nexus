@@ -167,6 +167,14 @@ each question a cancelled response), and a `hitl.cancel` for a deferred question
 just drops it. Deferred items are not pending interrupts: a resume addresses
 only the interrupt it was shown.
 
+**A client may resume the moment it reads `RUN_FINISHED(interrupt)`.** The
+interrupt frees the listener's run slot and parks the turn *before* it closes
+the stream, so an immediate resume is never refused as `a run is already in
+flight`. A resume drops the interrupts it answers *before* it unblocks the agent,
+so when a fast agent reaches its next client tool or question at once, the
+client's answer to that one is never refused as a `partial resume` naming the
+interrupt already answered.
+
 A tool call that is **neither** — not a server tool and not advertised by the
 current run (a hallucinated name, or a client tool from an earlier run) — does
 not suspend the run and does not hang it: `nexus.tool.catalog` answers the

@@ -275,3 +275,70 @@ func TestParkedTurnCancelCancelsDeferred(t *testing.T) {
 	}
 	<-done
 }
+
+// TestSuspendReleasesSlotBeforeClosingStream: an interrupt frees the active
+// slot and parks the turn before the run's stream closes. The client may
+// resume as soon as it reads RunFinished(interrupt); were the slot still
+// held then, that resume would be refused as "a run is already in flight",
+// and a deferred item arriving meanwhile would find no parked turn. The run
+// is already marked suspended at the release, so a disconnect in between
+// still leaves the parked agent alone.
+func TestSuspendReleasesSlotBeforeClosingStream(t *testing.T) {
+	cases := []struct {
+		name    string
+		suspend func(p *Plugin, r *run)
+	}{
+		{"client tool", func(p *Plugin, r *run) {
+			p.suspendForClientTool(r, events.ToolCall{
+				SchemaVersion: events.ToolCallVersion, ID: "call-a", Name: "probe", TurnID: "turn-a",
+			}, nil)
+		}},
+		{"hitl", func(p *Plugin, r *run) {
+			p.interruptForHITL(r, events.HITLRequest{
+				SchemaVersion: events.HITLRequestVersion, ID: "req-a", TurnID: "turn-a",
+				Mode: events.HITLModeFreeText, Prompt: "why?",
+			}, nil)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, r := newInterruptTestPlugin(t, "thread-a", "run-a")
+			r.onTurnStart(events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: "turn-a"})
+
+			released := false
+			p.releaseHook = func(hr *run, park *parkedTurn) {
+				if hr != r || park == nil {
+					return
+				}
+				released = true
+				select {
+				case <-r.done:
+					t.Error("the stream closed before the run released its slot")
+				default:
+				}
+				if !r.isSuspended() {
+					t.Error("the run released its slot before it was marked suspended")
+				}
+			}
+			tc.suspend(p, r)
+
+			if !released {
+				t.Fatal("the interrupt did not release the run with its turn parked")
+			}
+			select {
+			case <-r.done:
+			default:
+				t.Fatal("the stream is still open after the interrupt")
+			}
+			if p.currentRun() != nil {
+				t.Fatal("the slot is still held after the interrupt")
+			}
+			p.mu.Lock()
+			parked := p.parked
+			p.mu.Unlock()
+			if parked == nil || parked.turnID != "turn-a" {
+				t.Fatalf("parked = %+v, want turn-a parked", parked)
+			}
+		})
+	}
+}

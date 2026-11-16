@@ -170,6 +170,11 @@ type Plugin struct {
 	pendingMu sync.Mutex
 	pending   map[string]pendingInterrupt
 
+	// releaseHook, when set (tests only), is called on entry to releaseRun,
+	// before the slot is freed. It is how a test catches the ordering of the
+	// release against the run's stream closing.
+	releaseHook func(r *run, park *parkedTurn)
+
 	unsubs []func()
 }
 

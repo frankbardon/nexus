@@ -96,10 +96,9 @@ func (p *Plugin) interruptForHITL(r *run, req events.HITLRequest, carry []deferr
 
 	snapshot := p.buildStateSnapshot(r, interruptID, req)
 	payload := buildInterruptPayload(interruptID, req)
-	r.interrupt(snapshot, r.snapshotMessages(), payload)
-	// Clear the active-run pointer: the stream is done, but the agent remains
-	// blocked in-process on the pending hitl.
-	p.releaseRun(r, parkFor(r, req.TurnID, carry))
+	// The stream ends, but the agent remains blocked in-process on the
+	// pending hitl.
+	p.suspendRun(r, req.TurnID, carry, snapshot, payload)
 
 	p.logger.Info("agui run interrupted for hitl",
 		"interrupt_id", interruptID,

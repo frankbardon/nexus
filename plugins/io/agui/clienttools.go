@@ -84,8 +84,7 @@ func (p *Plugin) suspendForClientTool(r *run, tc events.ToolCall, carry []deferr
 
 	snapshot := p.buildClientToolState(r, interruptID, tc)
 	payload := buildClientToolInterrupt(interruptID, tc)
-	r.interrupt(snapshot, r.snapshotMessages(), payload)
-	p.releaseRun(r, parkFor(r, tc.TurnID, carry))
+	p.suspendRun(r, tc.TurnID, carry, snapshot, payload)
 
 	p.logger.Info("agui run interrupted for client tool",
 		"interrupt_id", interruptID,
