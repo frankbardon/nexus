@@ -13,7 +13,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/itchyny/gojq v0.12.20
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.4
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/philippgille/chromem-go v0.7.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
