@@ -8,7 +8,7 @@ module github.com/frankbardon/nexus/modules/objectstore-gcs
 go 1.26.0
 
 require (
-	cloud.google.com/go/auth v0.24.2
+	cloud.google.com/go/auth v0.24.4
 	cloud.google.com/go/storage v1.70.0
 	// Pinned to the newest core release rather than a v0.0.0 placeholder, so a
 	// `go get` of this module from outside the repository resolves to a real seam.
