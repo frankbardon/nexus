@@ -219,3 +219,114 @@ func TestCacheLRU(t *testing.T) {
 		t.Fatal("c should still be present")
 	}
 }
+
+func decisionCfg() map[string]any {
+	return map[string]any{
+		"backend":           "decision",
+		"candidate_roles":   []any{"quick", "balanced", "reasoning"},
+		"fallback_role":     "balanced",
+		"latency_budget_ms": 200,
+		"role_descriptions": map[string]any{"quick": "short factual answers"},
+	}
+}
+
+// fakeDecisionProvider answers decision.ask with a fixed choice.
+func fakeDecisionProvider(bus engine.EventBus, choice string, confidence float64, seen chan<- *events.DecisionAsk) {
+	bus.Subscribe("decision.ask", func(event engine.Event[any]) {
+		ask, ok := event.Payload.(*events.DecisionAsk)
+		if !ok {
+			return
+		}
+		ask.Provider = "fake"
+		ask.Answers = map[string]events.DecisionAnswer{
+			decisionKey: {Type: events.DecisionChoice, Choice: choice, Confidence: confidence},
+		}
+		if seen != nil {
+			seen <- ask
+		}
+	})
+}
+
+func TestInit_DecisionBackendNeedsNoClassifierRole(t *testing.T) {
+	p, _ := newClassifier(t, decisionCfg())
+	if p.backend != backendDecision {
+		t.Fatalf("backend = %q", p.backend)
+	}
+}
+
+func TestInit_UnknownBackend(t *testing.T) {
+	cfg := decisionCfg()
+	cfg["backend"] = "magic"
+	err := New().Init(engine.PluginContext{Bus: engine.NewEventBus(), Logger: testLogger, Config: cfg})
+	if err == nil {
+		t.Fatal("expected error for unknown backend")
+	}
+}
+
+func TestDecisionBackendWarmsCache(t *testing.T) {
+	p, bus := newClassifier(t, decisionCfg())
+	seen := make(chan *events.DecisionAsk, 1)
+	fakeDecisionProvider(bus, "quick", 0.9, seen)
+
+	prompt := "what time is it in tokyo"
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "reasoning",
+		Messages: []events.Message{{Role: "user", Content: prompt}},
+	}
+	_, _ = bus.EmitVetoable("before:llm.request", req)
+	if req.Role != "balanced" {
+		t.Fatalf("cache miss should apply fallback, got %s", req.Role)
+	}
+
+	ask := <-seen
+	q := ask.Questions[decisionKey]
+	if q.Type != events.DecisionChoice || len(q.Choices) != 3 || q.Choices["quick"] != "short factual answers" {
+		t.Errorf("question = %+v", q)
+	}
+	if ask.State != prompt {
+		t.Errorf("state = %v", ask.State)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if role, ok := p.cache.get(promptHash(prompt, defaultPrefixChars)); ok {
+			if role != "quick" {
+				t.Fatalf("cached %q, want quick", role)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("cache not warmed")
+}
+
+func TestDecisionBackendRespectsMinConfidence(t *testing.T) {
+	cfg := decisionCfg()
+	cfg["min_confidence"] = 0.8
+	p, bus := newClassifier(t, cfg)
+	seen := make(chan *events.DecisionAsk, 1)
+	fakeDecisionProvider(bus, "quick", 0.5, seen)
+
+	prompt := "ambiguous"
+	_, _ = bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
+		Messages: []events.Message{{Role: "user", Content: prompt}}})
+	<-seen
+	time.Sleep(20 * time.Millisecond)
+	if _, ok := p.cache.get(promptHash(prompt, defaultPrefixChars)); ok {
+		t.Fatal("low-confidence pick should not be cached")
+	}
+}
+
+func TestDecisionBackendIgnoresUnknownChoice(t *testing.T) {
+	p, bus := newClassifier(t, decisionCfg())
+	seen := make(chan *events.DecisionAsk, 1)
+	fakeDecisionProvider(bus, "gpt-9000", 1, seen)
+
+	prompt := "anything"
+	_, _ = bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
+		Messages: []events.Message{{Role: "user", Content: prompt}}})
+	<-seen
+	time.Sleep(20 * time.Millisecond)
+	if _, ok := p.cache.get(promptHash(prompt, defaultPrefixChars)); ok {
+		t.Fatal("unknown role should not be cached")
+	}
+}

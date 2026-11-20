@@ -157,6 +157,8 @@ func versionedPayloads() []versionedPayload {
 		{"RAGIngestDelete", func() any { return RAGIngestDelete{SchemaVersion: RAGIngestDeleteVersion} }, RAGIngestDeleteVersion},
 		// reranker.go
 		{"RerankRequest", func() any { return RerankRequest{SchemaVersion: RerankRequestVersion} }, RerankRequestVersion},
+		// decision.go
+		{"DecisionAsk", func() any { return DecisionAsk{SchemaVersion: DecisionAskVersion} }, DecisionAskVersion},
 		// search.go
 		{"SearchRequest", func() any { return SearchRequest{SchemaVersion: SearchRequestVersion} }, SearchRequestVersion},
 		// thinking.go

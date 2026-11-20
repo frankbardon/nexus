@@ -2829,6 +2829,33 @@ the fanout plugin watches `before:llm.request` for those roles. For
 `strategy: user`, the plugin emits `provider.fanout.choose` and waits for
 `provider.fanout.chosen` from the IO layer.
 
+### Decision providers (`decision.provider` capability)
+
+Each decision-provider plugin handles `decision.ask` events — typed questions
+(`yes_no`, `choice`, `score`) about a piece of state — and writes typed
+answers with probabilities back into the payload. A decision model is not an
+LLM and never rides `llm.request`. Consumers today: `nexus.router.classifier`
+with `backend: decision`.
+
+#### `nexus.decision.jev`
+
+Source: `plugins/decision/jev/plugin.go`. Speaks a Jev-compatible "System One"
+API. The default endpoint is a local LM Studio server hosting an open
+Jev-compatible decision model; point `endpoint` at TypeSafe's hosted API or a
+gateway to use the proprietary model.
+
+| Key           | Type     | Default                               | Description |
+|---------------|----------|---------------------------------------|-------------|
+| `endpoint`    | string   | `http://localhost:1234/v1/systemone`  | Full URL requests are POSTed to. |
+| `model`       | string   | *(empty)*                             | Model id sent as `model`. Empty omits the field (a local server uses its loaded model). |
+| `dialect`     | string   | `systemone`                           | `systemone`: yes/no questions go out as `noul`. `vercel`: as `boolean` (Vercel AI Gateway `/v1/evaluate`). Responses are parsed from either `noul` or `probability` regardless. Any other value fails `Init`. |
+| `api_key`     | string   | *(env)*                               | Bearer token. Optional — a local server needs none. |
+| `api_key_env` | string   | `JEV_API_KEY`                         | Env var read when `api_key` is unset. Unset env var = no `Authorization` header. |
+| `timeout`     | duration | `10s`                                 | HTTP request timeout. |
+
+If multiple providers register `decision.provider`, pin one via the top-level
+`capabilities:` block.
+
 ### Search providers (`search.provider` capability)
 
 Each search-provider plugin handles `search.request` events and writes results
@@ -4748,6 +4775,12 @@ probe `llm.request` tagged `_source: nexus.router.classifier`.
 | `cache_classification` | bool   | `true`       | Whether to cache decisions at all. |
 | `cache_max_entries`    | int    | `1024`       | LRU capacity. |
 | `latency_budget_ms`    | int    | `800`        | Drop the warm if the probe doesn't return within this window. |
+| `backend`              | string | `llm`        | `llm`: probe `classifier_role` via `llm.request` and parse a one-word answer. `decision`: ask the active `decision.provider` (e.g. `nexus.decision.jev`) one `choice` question over `candidate_roles` via `decision.ask`; no LLM call. |
+| `decision_instructions`| string | *(default)*  | `decision` backend only. Instructions for the choice question. |
+| `role_descriptions`    | map    | *(empty)*    | `decision` backend only. Role name → description shown as that choice's criteria. Roles without one get `model role "<name>", tier i of n`. |
+| `min_confidence`       | float  | `0`          | `decision` backend only. Picks whose confidence is below this are not cached. |
+
+`classifier_role` is required for `backend: llm` and ignored for `backend: decision`.
 
 ---
 

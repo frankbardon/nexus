@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.decision.jev.json",
+  "title": "nexus.decision.jev",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "endpoint":    {"type": "string", "description": "Full URL of the System One endpoint. Defaults to LM Studio's local http://localhost:1234/v1/systemone."},
+    "model":       {"type": "string", "description": "Model id sent with each request. Empty omits the field."},
+    "dialect":     {"type": "string", "enum": ["systemone", "vercel"], "description": "Wire vocabulary: systemone (yes/no type 'noul') or vercel (yes/no type 'boolean')."},
+    "api_key":     {"type": "string", "description": "Bearer token. Optional for a local server."},
+    "api_key_env": {"type": "string", "description": "Env var holding the bearer token. Defaults to JEV_API_KEY."},
+    "timeout":     {"type": "string", "description": "HTTP request timeout (Go duration). Defaults to 10s."}
+  }
+}

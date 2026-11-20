@@ -69,6 +69,9 @@ import (
 	"github.com/frankbardon/nexus/plugins/providers/gemini"
 	"github.com/frankbardon/nexus/plugins/providers/openai"
 
+	// Decision provider plugins (advertise the "decision.provider" capability).
+	jevdecision "github.com/frankbardon/nexus/plugins/decision/jev"
+
 	// Search provider plugins (advertise the "search.provider" capability).
 	anthropicnativesearch "github.com/frankbardon/nexus/plugins/search/anthropic_native"
 	bravesearch "github.com/frankbardon/nexus/plugins/search/brave"
@@ -211,6 +214,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.llm.gemini", gemini.New)
 	r.Register("nexus.provider.fallback", fallbackplugin.New)
 	r.Register("nexus.provider.fanout", fanoutplugin.New)
+
+	// Decision providers (capability: decision.provider)
+	r.Register("nexus.decision.jev", jevdecision.New)
 
 	// Search providers (capability: search.provider)
 	r.Register("nexus.search.brave", bravesearch.New)

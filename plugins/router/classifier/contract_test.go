@@ -15,7 +15,8 @@ func TestContract(t *testing.T) {
 	h.AssertSubscribesTo("before:llm.request", "llm.response")
 	// Requests are published through engine.PublishLLMRequest, which offers
 	// before:llm.request ahead of llm.request.
-	if got := h.Plugin().Emissions(); len(got) != 2 || got[0] != "before:llm.request" || got[1] != "llm.request" {
-		t.Errorf("Emissions() = %v, want [before:llm.request llm.request]", got)
+	// decision.ask is the decision backend's probe.
+	if got := h.Plugin().Emissions(); len(got) != 3 || got[0] != "before:llm.request" || got[1] != "llm.request" || got[2] != "decision.ask" {
+		t.Errorf("Emissions() = %v, want [before:llm.request llm.request decision.ask]", got)
 	}
 }

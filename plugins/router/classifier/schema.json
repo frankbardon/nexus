@@ -4,9 +4,15 @@
   "title": "nexus.router.classifier",
   "type": "object",
   "additionalProperties": false,
-  "required": ["classifier_role", "candidate_roles"],
+  "required": ["candidate_roles"],
+  "if": {"properties": {"backend": {"const": "decision"}}, "required": ["backend"]},
+  "else": {"required": ["classifier_role"]},
   "properties": {
-    "classifier_role":      {"type": "string", "description": "Role from core.models used for the classifier probe."},
+    "backend":              {"type": "string", "enum": ["llm", "decision"], "description": "llm (default): probe classifier_role via llm.request. decision: ask the active decision.provider one choice question."},
+    "classifier_role":      {"type": "string", "description": "Role from core.models used for the classifier probe. Required for backend: llm."},
+    "decision_instructions": {"type": "string", "description": "Instructions for the decision backend's choice question."},
+    "role_descriptions":    {"type": "object", "additionalProperties": {"type": "string"}, "description": "Per-candidate-role description shown to the decision provider."},
+    "min_confidence":       {"type": "number", "minimum": 0, "maximum": 1, "description": "Decision backend: don't cache picks below this confidence."},
     "fallback_role":        {"type": "string", "description": "Candidate role used on cache miss while the cache warms."},
     "candidate_roles": {
       "type": "array",
