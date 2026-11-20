@@ -32,6 +32,7 @@ var versions = map[string]int{
 	"CompactionTriggered":         CompactionTriggeredVersion,
 	"ConfigReloadRequest":         ConfigReloadRequestVersion,
 	"ConfigReloadResult":          ConfigReloadResultVersion,
+	"DecisionAsk":                 DecisionAskVersion,
 	"EmbeddingsRequest":           EmbeddingsRequestVersion,
 	"ErrorInfo":                   ErrorInfoVersion,
 	"HistoryQuery":                HistoryQueryVersion,

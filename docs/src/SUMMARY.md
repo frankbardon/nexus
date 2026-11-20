@@ -69,6 +69,8 @@
   - [Topic-Aware Pruner](./plugins/memory/topic_pruner.md)
   - [Long-Term Memory](./plugins/memory/longterm.md)
   - [Vector Memory](./plugins/memory/vector.md)
+- [Decision Providers](./plugins/decision/index.md)
+  - [Jev](./plugins/decision/jev.md)
 - [Embeddings](./plugins/embeddings/index.md)
   - [OpenAI](./plugins/embeddings/openai.md)
   - [Mock](./plugins/embeddings/mock.md)

@@ -13,6 +13,12 @@
 //     round-trip on the very first request — the trade-off documented
 //     in the idea 09 plan ("first step in a chain pays cache creation").
 //
+// Backends: `backend: llm` (default) asks classifier_role through
+// llm.request and parses a one-word answer. `backend: decision` asks a
+// decision.provider (e.g. nexus.decision.jev) one typed `choice` question
+// over the candidate roles instead — no LLM call, no free-text parsing, and
+// a confidence that `min_confidence` can gate caching on.
+//
 // Recursion guard: the classifier's own llm.request is tagged
 // `_source: nexus.router.classifier` and the handler skips when that
 // tag is set, so the classifier cannot route itself.
@@ -48,7 +54,15 @@ const (
 	defaultPrefixChars  = 256
 	defaultLatencyMs    = 800
 	defaultCacheEntries = 1024
+
+	backendLLM      = "llm"
+	backendDecision = "decision"
+
+	// decisionKey is the question key the decision backend asks under.
+	decisionKey = "role"
 )
+
+const defaultDecisionInstructions = `Pick the model role that should answer this user prompt. The roles are ordered cheapest first. Pick the cheapest role that can answer correctly; use a stronger role only when the prompt needs multi-step reasoning, complex tool use, long-context analysis, or nuanced creative output.`
 
 // New creates a new classifier router instance.
 func New() engine.Plugin {
@@ -69,6 +83,11 @@ type Plugin struct {
 	latencyMs      int
 	prompt         string
 	cacheEnabled   bool
+
+	backend          string
+	decisionInstr    string
+	roleDescriptions map[string]string
+	minConfidence    float64
 
 	cache *cache
 
@@ -105,8 +124,32 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if len(p.candidateRoles) == 0 {
 		return fmt.Errorf("router.classifier: candidate_roles list is required")
 	}
-	if p.classifierRole == "" {
+	p.backend = backendLLM
+	if v, ok := ctx.Config["backend"].(string); ok && v != "" {
+		switch v {
+		case backendLLM, backendDecision:
+			p.backend = v
+		default:
+			return fmt.Errorf("router.classifier: unknown backend %q (want %q or %q)", v, backendLLM, backendDecision)
+		}
+	}
+	if p.backend == backendLLM && p.classifierRole == "" {
 		return fmt.Errorf("router.classifier: classifier_role is required")
+	}
+	p.decisionInstr = defaultDecisionInstructions
+	if v, ok := ctx.Config["decision_instructions"].(string); ok && v != "" {
+		p.decisionInstr = v
+	}
+	p.roleDescriptions = map[string]string{}
+	if raw, ok := ctx.Config["role_descriptions"].(map[string]any); ok {
+		for k, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				p.roleDescriptions[k] = s
+			}
+		}
+	}
+	if v, ok := numericFloat(ctx.Config["min_confidence"]); ok {
+		p.minConfidence = v
 	}
 
 	p.prefixChars = defaultPrefixChars
@@ -143,6 +186,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	)
 
 	p.logger.Info("classifier router initialized",
+		"backend", p.backend,
 		"classifier_role", p.classifierRole,
 		"candidate_roles", strings.Join(p.candidateRoles, ","),
 		"fallback_role", p.fallbackRole,
@@ -173,7 +217,12 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	}
 }
 
-func (p *Plugin) Emissions() []string { return []string{"before:llm.request", "llm.request"} }
+// Emissions lists both backends' events: the plugin is the same code path
+// either way, and the configured backend picks which of them it actually
+// fires.
+func (p *Plugin) Emissions() []string {
+	return []string{"before:llm.request", "llm.request", "decision.ask"}
+}
 
 func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 	vp, ok := event.Payload.(*engine.VetoablePayload)
@@ -216,6 +265,10 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 	// Cache miss: route to fallback now and warm the cache asynchronously.
 	if p.fallbackRole != "" {
 		p.applyDecision(req, p.fallbackRole, "fallback")
+	}
+	if p.backend == backendDecision {
+		go p.decideAndCache(prompt, key)
+		return
 	}
 	go p.classifyAndCache(prompt, key)
 }
@@ -299,6 +352,64 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 	}
 }
 
+// decideAndCache asks the decision.provider to pick a candidate role as one
+// typed choice question, and caches the pick. The provider answers
+// synchronously inside Emit, so the latency budget is enforced by racing
+// that call: a late answer is dropped rather than cached.
+func (p *Plugin) decideAndCache(prompt, key string) {
+	choices := make(map[string]string, len(p.candidateRoles))
+	for i, role := range p.candidateRoles {
+		desc := p.roleDescriptions[role]
+		if desc == "" {
+			desc = fmt.Sprintf("model role %q, tier %d of %d (1 = cheapest)", role, i+1, len(p.candidateRoles))
+		}
+		choices[role] = desc
+	}
+	ask := &events.DecisionAsk{
+		SchemaVersion: events.DecisionAskVersion,
+		State:         prompt,
+		Questions: map[string]events.DecisionQuestion{
+			decisionKey: {Type: events.DecisionChoice, Instructions: p.decisionInstr, Choices: choices},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := p.bus.Emit("decision.ask", ask); err != nil {
+			ask.Error = err.Error()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Duration(p.latencyMs) * time.Millisecond):
+		p.logger.Warn("decision classifier timeout, cache not warmed", "key", key)
+		return
+	}
+
+	if ask.Provider == "" {
+		p.logger.Warn("decision backend: no decision.provider answered; activate one (e.g. nexus.decision.jev)")
+		return
+	}
+	if ask.Error != "" {
+		p.logger.Warn("decision classifier failed", "provider", ask.Provider, "error", ask.Error)
+		return
+	}
+	ans := ask.Answers[decisionKey]
+	if _, ok := choices[ans.Choice]; !ok {
+		p.logger.Warn("decision classifier returned unknown role", "choice", ans.Choice)
+		return
+	}
+	if ans.Confidence < p.minConfidence {
+		p.logger.Log(context.Background(), engine.LevelTrace, "decision below min_confidence, not cached",
+			"choice", ans.Choice, "confidence", ans.Confidence)
+		return
+	}
+	if p.cacheEnabled {
+		p.cache.put(key, ans.Choice)
+	}
+}
+
 func (p *Plugin) handleLLMResponse(event engine.Event[any]) {
 	resp, ok := event.Payload.(events.LLMResponse)
 	if !ok {
@@ -371,6 +482,18 @@ func numericInt(v any) (int, bool) {
 		return int(n), true
 	case float64:
 		return int(n), true
+	}
+	return 0, false
+}
+
+func numericFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
 	}
 	return 0, false
 }

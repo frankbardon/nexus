@@ -1078,6 +1078,51 @@ active — they do not depend on `core.object_store.backend`.
 
 ---
 
+## Decision Events
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `decision.ask` | `*DecisionAsk` | Typed questions for a `decision.provider` (e.g. `nexus.decision.jev`). Pointer-fill — provider mutates in place. Emitted by `nexus.router.classifier` with `backend: decision`. |
+
+Not to be confused with `decision.requested` / `decision.completed`, which
+belong to the out-of-tree Verdict plugin (`nexus.decision.verdict`) and
+evaluate a DMN model rather than ask a decision model.
+
+### Payloads
+
+**DecisionAsk**
+| Field | Type | Description |
+|-------|------|-------------|
+| `State` | any | What the questions are about: a string, or a JSON-encodable map/slice (input). |
+| `Questions` | map[string]DecisionQuestion | Asker-chosen key → question (input). |
+| `Model` | string | Optional per-call model override (input). |
+| `Answers` | map[string]DecisionAnswer | Answers under the same keys (output). |
+| `ServedModel` | string | Model version the provider reported (output). |
+| `InputTokens` / `OutputTokens` | int | Usage when reported (output). |
+| `Provider` | string | Plugin ID of the adapter that answered (output). Non-empty on input means another provider already answered. |
+| `Error` | string | Non-empty on failure (output). |
+
+**DecisionQuestion**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Type` | string | `yes_no`, `choice` or `score`. |
+| `Instructions` | string | The question. |
+| `TrueMeans` / `FalseMeans` | string | Optional descriptions of each side (`yes_no`). |
+| `Choices` | map[string]string | Option key → description (`choice`, at least one). |
+| `Levels` | []string | Scale, lowest first, 2–10 entries (`score`). |
+
+**DecisionAnswer**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Type` | string | Question type, normalized to the Nexus name. |
+| `Probability` | float64 | P(yes) in [0,1] (`yes_no`). |
+| `Choice` | string | Selected key (`choice`). |
+| `Score` | float64 | Expected level index, fractional allowed (`score`). |
+| `Confidence` | float64 | Provider confidence in `Choice` / `Score`. |
+| `Probabilities` | map[string]float64 | Full distribution, when returned. |
+
+---
+
 ## Embeddings Events
 
 | Event Type | Payload | Description |
