@@ -9,7 +9,7 @@ go 1.26.0
 require (
 	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.18
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.116.0
 	// Pinned to the newest core release rather than a v0.0.0 placeholder, so a
 	// `go get` of this module from outside the repository resolves to a real seam.
 	// Inside the repository the replace below is what takes effect; consumers
