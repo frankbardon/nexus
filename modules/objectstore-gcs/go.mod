@@ -20,7 +20,7 @@ require (
 	// floor moved, so the pin is gone rather than merely bumped. If a future
 	// release outruns the go directive above again, move the two together with
 	// the go-version matrix in .github/workflows/ci.yml, never separately.
-	google.golang.org/api v0.315.0
+	google.golang.org/api v0.316.0
 )
 
 require (
