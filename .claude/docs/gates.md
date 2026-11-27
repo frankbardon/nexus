@@ -42,7 +42,7 @@ nexus.gate.stop_words:
 # Session token ceiling.
 nexus.gate.token_budget:
   max_tokens: 100000    # session total
-  warning_threshold: 0.8  # warn at 80%
+  # An 80% one-shot warning is built in and not configurable.
   message: "Token budget exhausted for this session."
 
 # Request rate throttling (pauses, does not reject).

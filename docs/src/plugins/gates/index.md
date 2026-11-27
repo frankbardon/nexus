@@ -57,13 +57,18 @@ See the recursion convention in
 `nexus.gate.token_budget` emits a one-shot `io.output` system message —
 `Warning: <dimension> budget at <n>%` — the first time a bucket (one ceiling's
 session, tenant or source-plugin key) reaches **80%** of its tightest
-configured limit. It fires once per bucket and does not repeat on later
-requests; a `day` window that rolls over keeps the flag, so the warning does
-not fire again in the new window. For session and source-plugin ceilings,
-utilisation is measured after the request's estimate is reserved, so the
-warning arrives on the request that would cross 80%. A request vetoed by a
-`block` ceiling rolls its reservation back and does not use up the warning.
-Tenant ceilings are checked against booked usage only. The warning is not
+configured limit. The "already warned" flag is held in memory, so it fires
+once per bucket per process and does not repeat on later requests; after a
+restart it can fire again (tenant totals persist in SQLite, the flag does not).
+Known limitation: a `day` window that rolls over does not reset the flag, so
+the warning does not fire again in the new window. For session and
+source-plugin ceilings, utilisation is measured after the request's estimate
+is reserved, so the warning arrives on the request that would cross 80%, and a
+request vetoed by a `block` ceiling rolls its reservation back and does not use
+up the warning. Tenant ceilings are checked against booked usage only, before
+the session pass, so a tenant 80% warning can fire on a request that a later
+session or source-plugin `block` ceiling then vetoes. On a request that passes,
+`on_exceed: warn` messages are emitted before 80% warnings. The warning is not
 configurable and is separate from `on_exceed: warn`, which fires on every
 request once a limit is actually reached.
 
