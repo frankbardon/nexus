@@ -5128,7 +5128,7 @@ provider publishes the completed response.
 Source: `plugins/gates/token_budget/plugin.go`. Multi-dimensional ceilings
 (session / tenant / source_plugin) with `block`, `warn`, or `downgrade-model`
 actions. The legacy single-ceiling shape (`max_tokens`) still works as a
-session total-token ceiling.
+session total-token ceiling. Separately, a fixed one-shot `io.output` warning fires at 80% utilisation per bucket (in-memory flag, once per process); it has no configuration key.
 
 | Key                    | Type   | Default                                     | Description |
 |------------------------|--------|---------------------------------------------|-------------|

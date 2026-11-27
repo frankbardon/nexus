@@ -77,7 +77,7 @@ All gates subscribe to `before:*` vetoable events at priority 10.
 |--------|----|------------|
 | Endless Loop | `nexus.gate.endless_loop` | `max_iterations` (default `25`), `warning_at` (default `0`) |
 | Stop Words | `nexus.gate.stop_words` | `words`, `word_files`, `case_sensitive` (default `false`) |
-| Token Budget | `nexus.gate.token_budget` | `max_tokens` (default `100000`), `warning_threshold` (default `0.8`) |
+| Token Budget | `nexus.gate.token_budget` | `max_tokens` (default `100000`); fixed, non-configurable one-shot warning at 80% |
 | Rate Limiter | `nexus.gate.rate_limiter` | `requests_per_minute` (default `60`), `window_seconds` (default `60`), `pause_message` |
 | Prompt Injection | `nexus.gate.prompt_injection` | `action` (`block`/`warn`), `patterns`, `patterns_file` |
 | JSON Schema | `nexus.gate.json_schema` | `schema`/`schema_file`, `max_retries` (default `3`), `retry_prompt` |

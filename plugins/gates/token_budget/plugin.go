@@ -274,6 +274,12 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 	// spend that excludes the dead attempt.
 	p.releaseReservationLocked(req.RequestID)
 	var res *reservation
+	// Nothing is emitted while p.mu is held: io.output dispatch is
+	// synchronous, so a subscriber that re-enters this plugin (or a helper
+	// that takes p.mu itself) would deadlock. Outputs are collected here
+	// and emitted after the final unlock.
+	var pending []string
+	var warnCands []warnCandidate
 	for _, c := range p.ceilings {
 		if c.Dimension == dimTenant {
 			continue
@@ -294,23 +300,27 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		if exceeded {
 			switch c.OnExceed {
 			case actionWarn:
-				p.mu.Unlock()
-				p.emitOutput(c.message(reason))
-				p.mu.Lock()
+				pending = append(pending, c.message(reason))
 				continue
 			case actionDowngrade:
-				p.mu.Unlock()
+				// applyDowngrade only rewrites req and logs; it neither
+				// emits nor takes p.mu, so it is safe under the lock.
 				p.applyDowngrade(req, c, reason)
-				p.mu.Lock()
 				continue
 			default:
 				// Block: roll back any reservations we already booked for
-				// earlier ceilings so the veto is side-effect free.
+				// earlier ceilings so the veto is side-effect free. The
+				// 80% warnings collected so far describe reservations that
+				// were just rolled back, so they are dropped (and their
+				// one-shot flags left unset).
 				if res != nil {
 					p.rollbackReservationLocked(res)
 				}
 				p.mu.Unlock()
 				vp.Veto = engine.VetoResult{Vetoed: true, Reason: reason}
+				for _, msg := range pending {
+					p.emitOutput(msg)
+				}
 				p.emitOutput(c.message(reason))
 				return
 			}
@@ -329,13 +339,30 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 			output:   estOutput,
 			total:    estTotal,
 		})
-		// Take a snapshot for warn-emission outside the lock.
-		c.maybeWarn(p, bucketKey, *t)
+		// Snapshot the post-reservation totals; the 80% check runs once
+		// the request is known to pass every ceiling.
+		warnCands = append(warnCands, warnCandidate{c: c, bucketKey: bucketKey, totals: *t})
 	}
 	if res != nil && req.RequestID != "" {
 		p.reservations[req.RequestID] = res
 	}
+	for _, wc := range warnCands {
+		if msg, ok := wc.c.warningLocked(p, wc.bucketKey, wc.totals); ok {
+			pending = append(pending, msg)
+		}
+	}
 	p.mu.Unlock()
+	for _, msg := range pending {
+		p.emitOutput(msg)
+	}
+}
+
+// warnCandidate is a ceiling whose post-reservation totals still need the
+// one-shot 80% utilisation check.
+type warnCandidate struct {
+	c         ceiling
+	bucketKey string
+	totals    usageTotals
 }
 
 // rollbackReservationLocked subtracts a reservation's deltas from the totals
@@ -632,25 +659,33 @@ func (c ceiling) exceeded(t usageTotals) (bool, string) {
 }
 
 // maybeWarn emits a one-shot warning when a bucket crosses 80% utilisation.
-// Stored on the in-memory accumulator so we don't spam every request.
+// It takes p.mu for the check-and-set and emits after unlocking, so it must
+// NOT be called with p.mu held — use warningLocked there instead.
 func (c ceiling) maybeWarn(p *Plugin, bucketKey string, t usageTotals) {
+	p.mu.Lock()
+	msg, ok := c.warningLocked(p, bucketKey, t)
+	p.mu.Unlock()
+	if ok {
+		p.emitOutput(msg)
+	}
+}
+
+// warningLocked reports whether the bucket has crossed 80% utilisation for
+// the first time and, if so, marks the warning as emitted and returns its
+// text. Stored on the in-memory accumulator so we don't spam every request.
+// It never emits. Must be called with p.mu held.
+func (c ceiling) warningLocked(p *Plugin, bucketKey string, t usageTotals) (string, bool) {
 	const warnAt = 0.80
 	util := c.utilisation(t)
 	if util < warnAt {
-		return
+		return "", false
 	}
-	p.mu.Lock()
-	emitted := p.warningEmitted[c.cacheKey(bucketKey)]
-	if !emitted {
-		p.warningEmitted[c.cacheKey(bucketKey)] = true
+	ck := c.cacheKey(bucketKey)
+	if p.warningEmitted[ck] {
+		return "", false
 	}
-	p.mu.Unlock()
-	if emitted {
-		return
-	}
-	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("Warning: %s budget at %.0f%%", c.Dimension, util*100),
-		Role: "system",
-	})
+	p.warningEmitted[ck] = true
+	return fmt.Sprintf("Warning: %s budget at %.0f%%", c.Dimension, util*100), true
 }
 
 // utilisation returns the maximum 0..1 ratio across all configured limits.
